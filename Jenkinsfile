@@ -3,89 +3,68 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = shubhamchavan391/jenkins-static-website
+        // Replace with your Docker Hub username and repository name
+        DOCKER_IMAGE_NAME = 'YOUR_DOCKERHUB_USERNAME/static-website'
+        TAG = 'latest'
+        
+        // The ID of the credential you created in Jenkins for Docker Hub
+        DOCKER_CREDENTIALS_ID = 'dockerhub-creds'
+    }
+
     stages {
         stage('Clone') {
             steps {
+                // Automatically pulls the latest source code from your connected GitHub repository
                 checkout scm
             }
         }
 
         stage('Build') {
             steps {
-                sh 'docker build -t $IMAGE_NAME:$BUILD_NUMBER .'
-                sh 'docker tag $IMAGE_NAME:$BUILD_NUMBER $IMAGE_NAME:latest'
+                script {
+                    echo "Building Docker image from Dockerfile..."
+                    app = docker.build("${DOCKER_IMAGE_NAME}:${TAG}")
+                }
             }
         }
 
         stage('Test') {
             steps {
-                sh '''
-                    docker rm -f website-ci-test || true
-                    docker run -d --name website-ci-test \
-                        -p 8081:80 $IMAGE_NAME:$BUILD_NUMBER
-
-                    for i in $(seq 1 15); do
-                        if curl -fsS http://localhost:8081/ -o /dev/null; then
-                            echo "Website test passed"
-                            
-                            exit 0
-                        fi
-                        sleep 2
-                    done
-
-                    docker logs website-ci-test || true
-                    docker rm -f website-ci-test || true
-                    exit 1
-                '''
-            }
-        }
-
-        stage('Push to Docker Hub') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: dockerhub-creds,
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )
-                ]) {shubhamchavan391--password-stdin
-
-                        docker push $IMAGE_NAME:$BUILD_NUMBER
-                        docker push $IMAGE_NAME:latest
-
-                        docker logout
-                    '''
+                script {
+                    echo "Validating that the container runs locally and the website is accessible on port 8081..."
+                    
+                    // Run container in background mapping port 8081
+                    sh "docker run -d --name test-website-container -p 8081:80 ${DOCKER_IMAGE_NAME}:${TAG}"
+                    
+                    // Perform a curl request to verify the web server is responding on port 8081
+                    sh "curl -I http://localhost:8081"
+                    
+                    // Clean up test container
+                    sh "docker rm -f test-website-container"
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Push') {
             steps {
-                sh '''
-                    docker rm -f static-website || true
-                    docker run -d \
-                        --restart unless-stopped \
-                        --name static-website \
-                        -p 8081:80 $IMAGE_NAME:$BUILD_NUMBER
-
-                    curl -fsS http://localhost:8081/ -o /dev/null
-                    echo "Deployment successful"
-                '''
+                script {
+                    echo "Securely authenticating and pushing final image to Docker Hub..."
+                    docker.withRegistry('https://registry.hub.docker.com', "${DOCKER_CREDENTIALS_ID}") {
+                        app.push("${TAG}")
+                    }
+                }
             }
         }
     }
 
     post {
         always {
-            sh 'docker rm -f website-ci-test || true'
-        }
-        success {
-            echo 'CI/CD pipeline completed successfully!'
+            // Cleans up the Jenkins workspace
+            cleanWs()
         }
         failure {
-            echo 'Pipeline failed. Check the Jenkins console output.'
+            // Ensures leftover test containers are purged if a test fails
+            sh "docker rm -f test-website-container || true"
         }
     }
 }
-
